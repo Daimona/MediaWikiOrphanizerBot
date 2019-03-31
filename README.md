@@ -1,8 +1,8 @@
 # MediaWiki Orphanizer bot
 
-This software is an Italian Wikipedia bot. It delinks page titles.
+This software is an Italian Wikipedia bot. It delinks page titles. Infos:
 
-Actually this is just a proof-of-concept from an idea of [Parma1983](https://it.wikipedia.org/wiki/Utente:Parma1983) and [.avgas](https://it.wikipedia.org/wiki/Utente:.avgas) and other awesome wikiguys.
+* https://it.wikipedia.org/wiki/Utente:OrfanizzaBot
 
 ## Installation
 
@@ -28,6 +28,7 @@ and one with generic config (to be passed via `cfg`). The latter should be a JSO
 * `warmup` (int) - number of __seconds__ to wait before starting (after last edit on the list)
 * `cooldown` (int) - number of __edits__ to do until shutdown (you may want to re-schedule)
 * `delay` (int) - number of __seconds__ to wait before saving
+* `turbofresa` (int) - if the list is older than this number of seconds, a turbofresa will be spawned to clear the list
 
 An example:
 
@@ -73,6 +74,12 @@ Available options, most of them also on-wiki:
  	Start only if the last edit on the list was done at least $warmup seconds ago
  --cooldown=VALUE
  	End early when reaching this number of edits
+ --turbofresa=VALUE
+ 	If the list is older than this number of seconds a turbofresa will be spawned to clean the list
+ --turbofresa-text=VALUE
+ 	Text that will be saved to clean an old list
+ --turbofresa-summary=VALUE
+ 	Edit summary to be used when cleaning an old list
  --seealso=VALUE
  	Title of your local "See also" section
  --debug

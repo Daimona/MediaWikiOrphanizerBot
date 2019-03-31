@@ -14,7 +14,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-namespace itwikidelbot;
+namespace orphanizerbot;
 
 // die on whatever error
 set_error_handler( function( $errno, $errstr, $errfile, $errline ) {
@@ -47,28 +47,32 @@ use \cli\Log;
 use \web\MediaWikis;
 use \mw\Wikilink;
 use \mw\Ns;
+use \mw\API;
 use \mw\API\ProtectedPageException;
 use \regex\Generic as Regex;
 
 // register available options
 $opts = Opts::instance()->register( [
 	// register arguments with a value
-	new ParamValued( 'wiki',           null, 'Specify a wiki from its UID' ),
-	new ParamValued( 'cfg',            null, 'Title of an on-wiki configuration page with JSON content model' ),
-	new ParamValued( 'list',           null, 'Specify a pagename that should contain the wikilinks to be orphanized' ),
-	new ParamValued( 'summary',        null, 'Edit summary' ),
-	new ParamValued( 'list-summary',   null, 'Edit summary for editing the list' ),
-	new ParamValued( 'done-text',      null, 'Replacement for the wikilink in the list' ),
-	new ParamValued( 'ns',             null, 'Namespace whitelist' ),
-	new ParamValued( 'delay',          null, 'Additional delay between each edit' ),
-	new ParamValued( 'warmup',         null, 'Start only if the last edit on the list was done at least $warmup seconds ago' ),
-	new ParamValued( 'cooldown',       null, 'End early when reaching this number of edits' ),
-	new ParamValued( 'seealso',        null, 'Title of your local "See also" section' ),
+	new ParamValued( 'wiki',               null, 'Specify a wiki from its UID' ),
+	new ParamValued( 'cfg',                null, 'Title of an on-wiki configuration page with JSON content model' ),
+	new ParamValued( 'list',               null, 'Specify a pagename that should contain the wikilinks to be orphanized' ),
+	new ParamValued( 'summary',            null, 'Edit summary' ),
+	new ParamValued( 'list-summary',       null, 'Edit summary for editing the list' ),
+	new ParamValued( 'done-text',          null, 'Replacement for the wikilink in the list' ),
+	new ParamValued( 'ns',                 null, 'Namespace whitelist' ),
+	new ParamValued( 'delay',              null, 'Additional delay between each edit' ),
+	new ParamValued( 'warmup',             null, 'Start only if the last edit on the list was done at least $warmup seconds ago' ),
+	new ParamValued( 'cooldown',           null, 'End early when reaching this number of edits' ),
+	new ParamValued( 'turbofresa',         null, 'If the list is older than this number of seconds a turbofresa will be spawned to clean the list' ),
+	new ParamValued( 'turbofresa-text',    null, 'Text that will be saved to clean an old list' ),
+	new ParamValued( 'turbofresa-summary', null, 'Edit summary to be used when cleaning an old list' ),
+	new ParamValued( 'seealso',            null, 'Title of your local "See also" section' ),
 
 	// register arguments without a value
-	new ParamFlag(   'debug',          null, 'Increase verbosity' ),
-	new ParamFlag(   'help',           'h',  'Show this message and quit' ),
-	new ParamFlag(   'no-interaction', null, 'Do not confirm every change' ),
+	new ParamFlag(   'debug',              null, 'Increase verbosity' ),
+	new ParamFlag(   'help',               'h',  'Show this message and quit' ),
+	new ParamFlag(   'no-interaction',     null, 'Do not confirm every change' ),
 ] );
 
 // show help screen
@@ -87,21 +91,39 @@ if( $opts->getArg( 'debug' ) ) {
 	Log::$DEBUG = true;
 }
 
+
+// wiki uid (from command line or from configuration file)
+$wiki_uid = Config::instance()->get( 'wiki' );
+$wiki_uid = $opts->getArg( 'wiki', $wiki_uid );
+if( ! $wiki_uid ) {
+	Log::error( "please choose the wiki! exit" );
+	exit( 1 );
+}
+
 // wiki instance
-$wiki = Mediawikis::findFromUid( $opts->getArg( 'wiki', 'itwiki' ) );
+$wiki = Mediawikis::findFromUid( $wiki_uid );
 
 // load the wiki config
 wiki_config();
 
 // parameters available both from cli and on-wiki
-$SUMMARY      = option( 'summary', "Bot TEST: orfanizzazione voci eliminate in seguito a [[WP:RPC|consenso cancellazione]]" );
-$LIST_SUMMARY = option( 'list-summary', "Aggiornamento elenco" );
-$DONE_TEXT    = option( 'done-text', "* [[Special:WhatLinksHere/$1]] - {{done}}" );
-$NS           = option( 'ns' );
-$WARMUP       = option( 'warmup', -1 );
-$COOLDOWN     = option( 'cooldown', 1000 );
-$DELAY        = option( 'delay', 0 );
-$SEEALSO      = option( 'seealso', 'Voci correlate' );
+$SUMMARY            = option( 'summary',      "Bot: pages orphanization" );
+$LIST_SUMMARY       = option( 'list-summary', "Bot: orphanization list update" );
+$DONE_TEXT          = option( 'done-text',    "* [[Special:WhatLinksHere/$1]] - {{done}}" );
+$NS                 = option( 'ns' );
+$WARMUP             = option( 'warmup', -1 );
+$COOLDOWN           = option( 'cooldown', 1000 );
+$DELAY              = option( 'delay', 0 );
+$SEEALSO            = option( 'seealso', "See also" );
+$TURBOFRESA         = option( 'turbofresa', 86400 );
+$TURBOFRESA_TEXT    = option( 'turbofresa-text', "== List ==\n* ..." );
+$TURBOFRESA_SUMMARY = option( 'turbofresa-summary', "Bot: list clean" );
+
+// hardcoded values (@TODO: consider an option)
+$GROUP        = 'sysop';
+
+// my username (well, it's not so important, just used to have a friendlier log message)
+$ME = explode( '@', API::$DEFAULT_USERNAME, 2 )[ 0 ];
 
 // query titles to be orphanized alongside the last revision of the list
 $responses =
@@ -113,7 +135,11 @@ $responses =
 			'revisions',
 		],
 		'rvslots' => 'main',
-		'rvprop'  => 'timestamp',
+		'rvprop'  => [
+			'comment',   // the edit summary is used to detect if the list was already cleaned
+			'user',      // the username     is used to detect if the last user is allowed
+			'timestamp', // the timestamp    is used to check the age of the last edit
+		],
 	] );
 
 // collect links and take the last edit timestamp
@@ -128,13 +154,63 @@ foreach( $responses as $response ) {
 			exit( 1 );
 		}
 
-		// check warmup
-		$timestamp = reset( $page->revisions )->timestamp;
-		$timestamp = \DateTime::createFromFormat( \DateTime::ISO8601, $timestamp );
-		$seconds = time() - $timestamp->getTimestamp();
-		if( $seconds < $WARMUP ) {
-			Log::info( "edited just $seconds seconds ago: quit until warmup $WARMUP" );
-			exit( 1 );
+		if( isset( $page->revisions ) ) {
+			// check warmup
+			$revision = reset( $page->revisions );
+			$timestamp = $revision->timestamp;
+			$timestamp_datetime = \DateTime::createFromFormat( \DateTime::ISO8601, $timestamp );
+			$seconds = time() - $timestamp_datetime->getTimestamp();
+			if( $seconds < $WARMUP ) {
+				Log::info( "list edited just $seconds seconds ago: quit until warmup $WARMUP" );
+				exit( 1 );
+			}
+
+			// eventually clear list
+			if( $seconds > $TURBOFRESA ) {
+				if( $revision->comment === $TURBOFRESA_SUMMARY ) {
+					Log::info( "list edited $seconds seconds ago. already cleared. quit" );
+				} else {
+					Log::info( "list edited $seconds seconds ago. spawning a turbofresa to clear the list. quit" );
+
+					// TODO: dedicated customizable summary
+					// TODO: customizable content
+					$wiki->login()->edit( [
+						'title'         => $TITLE_SOURCE,
+						'summary'       => $TURBOFRESA_SUMMARY,
+						'text'          => $TURBOFRESA_TEXT,
+						'basetimestamp' => $timestamp,
+						'bot'           => 1,
+					] );
+
+				}
+
+				exit( 0 );
+			}
+
+			// check user
+			$lastuser = $revision->user;
+			$rights =
+				$wiki->fetch( [
+					'action'  => 'query',
+					'list'    => 'users',
+					'usprop'  => 'groups',
+					'ususers' => $lastuser,
+				] );
+
+			// warn about that above user and eventually quit
+			$lastuser_was = "$lastuser was the last editor: ";
+			$groups = reset( $rights->query->users )->groups;
+			if( in_array( $GROUP, $groups, true ) ) {
+				Log::info( $lastuser_was . "a $GROUP. OK" );
+			} else {
+				if( $wiki->isLogged() && $lastuser === $wiki->getUsername() || $lastuser === $ME ) {
+					Log::info( $lastuser_was . "It's-a me, Mario! quit" );
+					exit( 0 );
+				} else {
+					Log::error( $lastuser_was . "not a $GROUP. quit" );
+					exit( 1 );
+				}
+			}
 		}
 
 		// collect links (if any)
@@ -148,7 +224,7 @@ foreach( $responses as $response ) {
 
 // die if no links
 if( ! $titles_to_be_orphanized ) {
-	Log::info( 'empty list' );
+	Log::info( "empty list: quit" );
 	exit( 1 );
 }
 
@@ -172,7 +248,10 @@ while( $less_titles_to_be_orphanized = array_splice( $titles_to_be_orphanized, 0
 			'action'  => 'query',
 			'titles'  => $less_titles_to_be_orphanized,
 			'prop'    => 'linkshere',
-			'lhprop'  => 'pageid',
+			'lhprop'  => [
+				'pageid',
+				'title',
+			],
 			'lhshow'  => '!redirect',
 			'lhlimit' => 300,
 	];
@@ -189,7 +268,7 @@ while( $less_titles_to_be_orphanized = array_splice( $titles_to_be_orphanized, 0
 		foreach( $response->query->pages as $page ) {
 			if( isset( $page->linkshere ) ) {
 				foreach( $page->linkshere as $linkingpage ) {
-					if ( $linkingpage->title !== $TITLE_SOURCE ) {
+					if( $linkingpage->title !== $TITLE_SOURCE ) {
 						$involved_pageids[] = (int) $linkingpage->pageid;
 					}
 				}
@@ -262,11 +341,11 @@ while( $less_involved_pageids = array_splice( $involved_pageids, 0, MAX_TRANCHE_
 				// parse the title being orphanized
 				$title = $wiki->createTitleParsing( $involved_pagetitle );
 
-				// If it's a category, remove it
-				if ( $title->getTitle()->getNs()->getID() === 14 ) {
+				// if it's a category, remove it
+				if( $title->getNs()->getID() === 14 ) {
 					$wikitext->removeCategory( $title->getTitle() );
 				}
-				
+
 				// a wikilink with and without alias
 				$wikilink_simple = $wiki->createWikilink( $title, Wikilink::NO_ALIAS );
 				$wikilink_alias  = $wiki->createWikilink( $title, Wikilink::WHATEVER_ALIAS );
@@ -417,6 +496,5 @@ if( $wikitext->isChanged() ) {
 		Log::warn( "can't update list because of protection" );
 	}
 }
-
 
 Log::info( "end" );
